@@ -1,0 +1,250 @@
+---
+title: "2018 Bacterial Abundance"
+author: "Christina Jimenez"
+date: "10/28/2020"
+output: github_document
+---
+
+# Introduction
+
+This document will be an analysis of the 2018 bacterial abundance data.
+
+# Load packages
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(lubridate)
+library(patchwork)
+```
+
+# Import data
+
+```{r}
+excel_sheets("~/Desktop/GITHUB/144l_students/Input_Data/week3/144L_2018_BactAbund.xlsx")
+```
+
+```{r}
+metadata <- read_excel("~/Desktop/GITHUB/144l_students/Input_Data/week3/144L_2018_BactAbund.xlsx", sheet = "Metadata")
+
+glimpse(metadata)
+```
+
+
+```{r}
+data <- read_excel("~/Desktop/GITHUB/144l_students/Input_Data/week3/144L_2018_BactAbund.xlsx", sheet = "Data")
+
+glimpse(data)
+```
+
+```{r}
+joined <- left_join(metadata, data)
+glimpse(joined)  
+```
+
+# Prepare data
+
+```{r}
+cells <- joined %>% 
+  mutate(Datetime = ymd_hm(Datetime),
+         cells = Cells_ml * 1000) %>% 
+  group_by(Experiment, Treatment, Bottle) %>%
+  mutate(interv = interval(first(Datetime), Datetime),
+         hours = interv/3600,
+         days = hours/24) %>%
+  ungroup() %>%
+  select(Experiment:DNA_Sample, hours, days, cells) %>%
+  drop_na(cells)
+
+glimpse(cells)
+```
+
+# Plot growth curves
+
+```{r fig.height=6, fig.width=6, message=FALSE, warning=FALSE}
+custom.colors <- c("Control" = "#00D3FFFF","Ash Leachate" = "#42FF00FF", "Mud Leachate" = "#FFF318FF", "Glucose_Nitrate_Phosphate" = "#4C00FFFF")
+levels <- c("Control", "Ash Leachate", "Mud Leachate", "Glucose_Nitrate_Phosphate")
+
+cells %>% 
+  ggplot(aes(x = days, y = cells, group = interaction(Experiment, Treatment, Bottle))) +
+  geom_errorbar(aes(ymin = cells, ymax = cells, color = factor(Treatment, levels = levels))) +
+  geom_line(aes(fill = factor(Treatment, levels = levels)), size = .5) +
+  geom_point(aes(fill = factor(Treatment, levels = levels)), size = 2, color = "black", shape = 21) +
+  labs(x = "Days", y = expression(paste("Cells, L"^-1)), fill = "") + 
+  guides(color = F) + 
+  scale_color_manual(values = custom.colors) + 
+  scale_fill_manual(values = custom.colors) + 
+  theme_bw()
+```
+
+# Exponential phase of growth
+
+```{r}
+ln_cells <- cells %>%
+  group_by(Experiment, Treatment, Bottle) %>%
+  mutate(ln_cells =log(cells),
+         diff_ln_cells = ln_cells - lag(ln_cells, default = first(ln_cells))) %>% 
+  ungroup()
+  
+```
+
+```{r fig.height=4, fig.width=12}
+ln_cells %>% 
+  mutate(dna = ifelse(DNA_Sample == T, "*", NA)) %>%
+  ggplot(aes(x = days, y = diff_ln_cells, group = interaction(Experiment, Treatment, Bottle))) + 
+  geom_line(aes(color = factor(Treatment, levels = levels)), size = 0.5) +
+  geom_point(aes(fill = factor("Treatment", levels = levels)), size = 2, color = "black", shape = 21) + 
+  geom_text(aes(label = dna), size = 8, color = "#E41A1C") +
+  labs(x = "Days", y = expression(paste("∆ln Cells, L"^-1)), fill = "") +
+  scale_color_manual(values = custom.colors) +
+  scale_fill_manual(values = custom.colors) +
+  facet_grid(Location~Bottle, scales = "free") +
+  theme_bw()
+```
+
+- Control Bottle A \ ~0-1 d (T0-T1)
+- Control Bottle B \ ~0-1 d (T0-T1)
+- Ash Leachate Bottle C \ ~0-0.5 d (T0-T1)
+- Ash Leachate Bottle D \ ~0-0.5 d (T0-T1)
+- Mud Leachate Bottle E \ ~0-0.5 d (T0-T1)
+- Mud Leachate Bottle F \ ~0-0.5 d (T0-T1)
+- Glucose_Nitrate_Phosphate Bottle G \ ~0-1 d (T0-T1)
+- Glucose_Nitrate_Phosphate Bottle H \ ~0-1 d (T0-T1)
+
+# Growth rates, doubling times, and ∆cell abundances
+
+```{r}
+growth <- ln_cells %>% 
+  mutate(exp_start = ifelse(Experiment == "144L_2018" & Bottle == "A", 0, NA),
+         exp_start = ifelse(Experiment == "144L_2018" & Bottle %in% c("B", "C", "D", "E", "F", "G", "H"), 0, exp_start),
+         exp_end = ifelse(Experiment == "144L_2018" & Bottle %in% c("A", "B", "C", "D", "E", "F", "G", "H"), 1)) %>%
+  group_by(Experiment, Treatment, Bottle) %>% 
+  mutate(ln_cells_exp_start = ifelse(Timepoint == exp_start, ln_cells, NA),
+         ln_cells_exp_end = ifelse(Timepoint == exp_end, ln_cells, NA),
+         cells_exp_start = ifelse(Timepoint == exp_start, cells, NA),
+         cells_exp_end = ifelse(Timepoint == exp_end, cells, NA),
+         days_exp_start = ifelse(Timepoint == exp_start, days, NA),
+         days_exp_end = ifelse(Timepoint == exp_end, days, NA)) %>% 
+  fill(ln_cells_exp_start:days_exp_end, .direction = "updown") %>% 
+  mutate(mew = (ln_cells_exp_end - ln_cells_exp_start)/(days_exp_end - days_exp_start),
+         doubling = log(2)/mew,
+         delta_cells = cells_exp_end - first(cells)) %>% 
+  ungroup()
+
+
+glimpse(growth)
+```
+
+# Convert bacterial abundance & change in bacterial abundance to carbon units
+
+```{r}
+bactcarbon <- growth %>% 
+  mutate(bc = cells *(2.5 * 10^-9),
+         delta_bc = delta_cells * (2.5 *10^-9))
+
+glimpse(bactcarbon)
+```
+
+# Calculate treatment averages
+
+```{r}
+averages <- bactcarbon %>% 
+  group_by(Experiment, Treatment, Timepoint) %>% 
+  mutate(ave_bc = mean(bc),
+         sd_bc = sd(bc)) %>% 
+  ungroup() %>% 
+  group_by(Experiment, Treatment) %>% 
+  mutate(ave_mew = mean (mew),
+         sd_mew = sd(mew),
+         ave_doubling = mean(doubling),
+         sd_doubling = sd(doubling),
+         ave_delta_cells = mean(delta_cells),
+         sd_delta_cells = sd(delta_cells),
+         ave_delta_bc = mean(delta_bc),
+         sd_delta_bc = sd(delta_bc)) %>% 
+  ungroup()
+  
+
+glimpse(averages)  
+```
+
+# Plot treatment averages
+
+```{r fig.height=4, fig.width=6}
+averages %>% 
+  ggplot(aes(x = days, y = ave_bc), group = interaction(Experiment, Treatment)) +
+  geom_errorbar(aes(ymin = ave_bc - sd_bc, ymax = ave_bc + sd_bc, color = factor(Treatment, levels = levels))) +
+  geom_line(aes(color = factor(Treatment, levels = levels)), size = 0.5) +
+  geom_point(aes(color = factor(Treatment, levels = levels)), color = "black", shape = 21, size = 2) +
+  scale_color_manual(values = custom.colors) +
+  scale_color_manual(values = custom.colors) +
+  labs(x = "Days", y = expression("Bacterial Carbon, umol C L"^-1), fill = "", color = "") +
+  guides(color = F) +
+  theme_bw()
+```
+
+## Barplots
+
+```{r}
+bar.data <- averages %>% 
+  select(Location, Treatment, ave_mew:sd_delta_bc) %>% 
+  distinct()
+```
+
+
+```{r}
+mew <- bar.data %>% 
+  ggplot(aes(x = factor(Treatment, levels = levels), y =ave_mew), group = interaction(Location, Treatment)) +
+  geom_col(color = "black", fill = "white") +
+  geom_errorbar(aes(ymin = ave_mew - sd_mew, ymax = ave_mew + sd_mew), width = 0.1) +
+  facet_grid(rows = "Location", scales = "free") +
+  facet_grid(~factor(Location, levels = levels), scales = "free") +
+  labs(x = "", y = expression("u, d"^-1)) +
+  theme_bw()
+```
+
+```{r}
+doubling <- bar.data %>% 
+  ggplot(aes(x = factor(Treatment, levels = levels), y =ave_doubling), group = interaction(Location, Treatment)) +
+  geom_col(color = "black", fill = "white") +
+  geom_errorbar(aes(ymin = ave_doubling - sd_doubling, ymax = ave_doubling + sd_doubling), width = 0.1) +
+  facet_grid(~factor(Location, levels = levels), scales = "free") +
+  labs(x = "", y = expression("Doubling Time, d")) +
+  theme_bw()
+```
+
+
+```{r}
+delta_bc <- bar.data %>% 
+  ggplot(aes(x = factor(Treatment, levels = levels), y =ave_delta_bc), group = interaction(Location, Treatment)) +
+  geom_col(color = "black", fill = "white") +
+  geom_errorbar(aes(ymin = ave_delta_bc - sd_delta_bc, ymax = ave_delta_bc + sd_delta_bc), width = 0.1) +
+  facet_grid(~factor(Location, levels = levels), scales = "free") +
+  labs(x = "", y = expression("∆ Bacterial Carbon, umol C L"^-1)) +
+  theme_bw()
+```
+
+
+```{r}
+delta_bc <- bar.data %>% 
+  ggplot(aes(x = factor(Treatment, levels = levels), y =ave_delta_bc), group = interaction(Location, Treatment)) +
+  geom_col(color = "black", fill = "white") +
+  geom_errorbar(aes(ymin = ave_delta_bc - sd_delta_bc, ymax = ave_delta_bc + sd_delta_bc), width = 0.1) +
+  facet_grid(~factor(Location, levels = levels), scales = "free") +
+  labs(x = "", y = expression("∆ Bacterial Carbon, umol C L"^-1)) +
+  theme_bw()
+```
+
+
+```{r fig.height=6, fig.width=14}
+delta_bc + mew + doubling + plot_annotation(tag_levels = "A")
+```
+
+
+# Save data
+
+```{r}
+saveRDS(averages, "~/Desktop/GITHUB/144l_students/Output_Data/week3/BactAbundanceData.rds")
+
+```
+
