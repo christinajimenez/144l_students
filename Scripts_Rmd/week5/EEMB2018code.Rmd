@@ -1,0 +1,247 @@
+---
+title: "EEMB144L_2018"
+author: "Christina Jimenez"
+date: "11/5/2020"
+output: github_document
+---
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(dada2)
+library(ShortRead)
+```
+
+# Import file names
+
+```{r}
+path <- "~/Desktop/GITHUB/144l_students/Input_Data/week5/EEMB144L_2018_fastq/"
+
+#store the names of the forward and rev files as lists
+fnFs <- list.files(path, pattern = "_R1_001.fastq", full.names = TRUE)
+fnRs <- list.files(path, pattern = "_R2_001.fastq", full.names = TRUE)
+```
+
+# Retrieve orientation of primers
+
+The primers targeted the V4 region and are known 514F-Y and 806RB primers (see Apprill et al., 2015)[http://www.int-res.com/articles/ame_oa/a075p129.pdf]
+
+```{r}
+#store the  forward and reverse primers
+FWD = "GTGYCAGCMGCCGCGGTAA"
+REV = "GGACTACNVGGGTWTCTAAT"
+
+#now store all the orientations of your forward and reverse  primers
+allOrients <- function(primer) {
+  # The Biostrings works w/ DNAString objects rather than character vectors
+  require(Biostrings)
+  dna <- DNAString(primer) 
+  orients <- c(Forward = dna, Complement = complement(dna), Reverse = reverse(dna), 
+               RevComp = reverseComplement(dna))
+  # Convert back to character vector
+  return(sapply(orients, toString))  
+}
+
+#store the fwd and reverse oreintations separately
+FWD.orients <- allOrients(FWD)
+REV.orients <- allOrients(REV)
+
+#view the orientations of the primers
+FWD.orients
+```
+
+```{r}
+REV.orients
+```
+
+# Search for Primers
+
+```{r}
+primerHits <- function(primer, fn) {
+  # Counts number of reads in which the primer is found
+  nhits <- vcountPattern(primer, sread(readFastq(fn)), fixed = FALSE)
+  return(sum(nhits > 0))
+}
+
+rbind(FWD.ForwardReads = sapply(FWD.orients, primerHits, fn = fnFs[[1]]), 
+      FWD.ReverseReads = sapply(FWD.orients, primerHits, fn = fnRs[[1]]), 
+      REV.ForwardReads = sapply(REV.orients, primerHits, fn = fnFs[[1]]), 
+      REV.ReverseReads = sapply(REV.orients, primerHits, fn = fnRs[[1]]))
+```
+
+In the FWD.ReverseReads there were 283 Reverse Complement strands detected and in the REV.ForwardReads there were 1195 Reverse Complement strands detected. The primeres will need to be removed with the MergePairs function by adding trimOverhang=T.
+
+
+## Forward reads
+```{r fig.height=10, fig.width=12}
+plotQualityProfile(fnFs[1:24])
+```
+
+
+## Reverse reads
+
+
+```{r fig.height=10, fig.width=12}
+plotQualityProfile(fnRs[1:24])
+```
+
+the forward and revese reeds will now need to be trimmed 
+
+# Filtering and Trimming
+
+```{r}
+sample.names <- sapply(strsplit(basename(fnFs),"_L"), `[`,1)
+sample.names
+
+filt_path <- file.path(path,"filtered")
+
+filtFs <- file.path(filt_path, paste0(sample.names, "_F_filt.fastq"))
+filtRs <- file.path(filt_path, paste0(sample.names, "_R_filt.fastq"))
+```
+
+```{r}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen = c(240,150),  maxN = 0, maxEE = c(2,2), truncQ = 2, rm.phix = TRUE, compress = TRUE) 
+
+out
+```
+
+# Learn the error rates
+
+```{r}
+errF <- learnErrors(filtFs, multithread = TRUE)
+errR <- learnErrors(filtRs, multithread = TRUE)
+```
+
+
+```{r echo = FALSE, warning = FALSE, message = FALSE, fig.height = 12, fig.width = 14, fig.align = "center", warning = FALSE}
+plotErrors(errF, nominalQ = TRUE)
+```
+
+```{r echo = FALSE, warning = FALSE, message = FALSE, fig.height = 12, fig.width = 14, fig.align = "center", warning = FALSE}
+plotErrors(errR, nominalQ = TRUE)
+```
+
+Shown above are the error rates for each possible transition. The black line is the error rates after convergence of the machine-learning algorithm, and the red are the error rates under the nominal definition of the Q-score. 
+
+# Dereplication
+
+
+```{r}
+derepFs <- derepFastq(filtFs, verbose = TRUE)
+derepRs <- derepFastq(filtRs, verbose = TRUE)
+
+names(derepFs) <- sample.names
+names(derepRs) <- sample.names
+```
+
+Above is all the identical sequences combined into one sequence.
+
+# Infer the sequence variants
+
+
+```{r}
+dadaFs <- dada(derepFs, err = errF, multithread = TRUE)
+dadaRs <- dada(derepRs, err = errR, multithread = TRUE)
+```
+
+Here is where the overlapping reads will merge and result in decreasing the number of sequence variants.
+
+```{r}
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose = TRUE, trimOverhang = T)
+```
+
+
+```{r}
+head(mergers[[1]])
+```
+
+
+```{r}
+saveRDS(mergers, "~/Desktop/GITHUB/144l_students/Output_Data/week5/EEMB144L_2018_merged.rds")
+```
+
+Sequence table of samples that are analagous to the "OTU table" produced by classical methods.
+
+```{r}
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+```
+
+The distribution of sequence lengths
+
+```{r}
+table(nchar(getSequences(seqtab))) 
+```
+
+# Remove the Chimeras
+
+Non-biological sequences formed by two or more biologicL sequences fused together during PCR, known as chimeras, need to be removed.
+
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab, verbose = TRUE)
+dim(seqtab.nochim)
+```
+
+
+```{r}
+sum(seqtab.nochim)/sum(seqtab)
+```
+
+
+# Assign taxonomy using a reference database
+
+Here we are referencing the Silva database
+
+```{r}
+taxa <- assignTaxonomy(seqtab.nochim, "~/Desktop/GITHUB/144l_students/Input_Data/week5/Reference_Database/silva_nr_v138_train_set.fa", multithread = TRUE)
+```
+
+
+```{r}
+saveRDS(t(seqtab.nochim), "~/Desktop/GITHUB/144l_students/Output_Data/week5/2018seqtab-nochimtaxa.rds")
+saveRDS(taxa,"~/Desktop/GITHUB/144l_students/Output_Data/week5/2018taxa.rds")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
